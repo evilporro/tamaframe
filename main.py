@@ -126,11 +126,11 @@ def log_tama_event(
         "user_id":    str(user_id) if user_id else None,
         "action":     action,
         "stage":      tama.get("stage", "unknown"),
-        "level":      tama.get("level", 0),
-        "feed":       tama.get("feed",       0),
-        "clean":      tama.get("clean",      0),
-        "focus":      tama.get("level_stat", 0),
-        "rest":       tama.get("rest",       0),
+        "level":      int(tama.get("level", 0)),
+        "feed":       int(tama.get("feed",       0)),
+        "clean":      int(tama.get("clean",      0)),
+        "focus":      int(tama.get("level_stat", 0)),
+        "rest":       int(tama.get("rest",       0)),
         "detail":     detail,
     }
     def _push():
