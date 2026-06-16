@@ -2902,6 +2902,26 @@ def safe_task(coro):
             traceback.print_exc()
     return asyncio.create_task(_wrapper())
 
+async def safe_respond(interaction: discord.Interaction, *args, **kwargs):
+    """
+    Wraps interaction.response.send_message / .defer for the *first* response
+    to an interaction. If the bot was mid-startup (tree sync, etc.) when the
+    click landed, Discord's ~3s interaction token can expire before our code
+    gets to run, raising discord.NotFound ("Unknown interaction"). That's a
+    timing race, not a real failure — the rest of the handler's logic (state
+    changes, channel ops) should still proceed instead of aborting.
+    Call with no args/kwargs to defer silently; pass send_message args as usual.
+    """
+    try:
+        if args or kwargs:
+            await interaction.response.send_message(*args, **kwargs)
+        else:
+            await interaction.response.defer()
+    except discord.NotFound:
+        print(f"[Tamaframe] Stale interaction token (likely startup race) on {interaction.data.get('custom_id', '?')} — continuing anyway.")
+    except discord.HTTPException as e:
+        print(f"[Tamaframe] Failed to respond to interaction: {e} — continuing anyway.")
+
 RECRUITER_PING_RESPONSES = [
     "WHO PINGED THE RECRUITER?! Use **/joinclan**. Just type it. Hit enter. Done. It's not complicated.",
     "Oh wonderful, another ping. Did you try **/joinclan**? No? Well try it now.",
@@ -3271,10 +3291,10 @@ class ControlSessionView(ui.View):
     async def _check(self, interaction: discord.Interaction, warlord_only: bool = False) -> bool:
         member = interaction.guild.get_member(interaction.user.id) or interaction.user
         if warlord_only and not is_warlord(member):
-            await interaction.response.send_message("❌ Warlord only.", ephemeral=True)
+            await safe_respond(interaction, "❌ Warlord only.", ephemeral=True)
             return False
         if not is_control_mod(member):
-            await interaction.response.send_message("❌ Officer or above only.", ephemeral=True)
+            await safe_respond(interaction, "❌ Officer or above only.", ephemeral=True)
             return False
         return True
 
@@ -3282,9 +3302,9 @@ class ControlSessionView(ui.View):
     async def cc_start(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
         if tama["active"]:
-            await interaction.response.send_message("❌ Session already active.", ephemeral=True)
+            await safe_respond(interaction, "❌ Session already active.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Starting session…", ephemeral=True)
+        await safe_respond(interaction, "✅ Starting session…", ephemeral=True)
         guild = interaction.guild
         category  = guild.get_channel(TAMA_CATEGORY_ID)
         tama_ch   = guild.get_channel(tama.get("channel_id")) if tama.get("channel_id") else None
@@ -3426,10 +3446,10 @@ class ControlActionView(ui.View):
     async def _check(self, interaction: discord.Interaction) -> bool:
         member = interaction.guild.get_member(interaction.user.id) or interaction.user
         if not is_control_mod(member):
-            await interaction.response.send_message("❌ Officer or above only.", ephemeral=True)
+            await safe_respond(interaction, "❌ Officer or above only.", ephemeral=True)
             return False
         if not tama["active"]:
-            await interaction.response.send_message("❌ No active session.", ephemeral=True)
+            await safe_respond(interaction, "❌ No active session.", ephemeral=True)
             return False
         return True
 
@@ -3640,10 +3660,10 @@ class ControlSetView(ui.View):
     async def _check(self, interaction: discord.Interaction) -> bool:
         member = interaction.guild.get_member(interaction.user.id) or interaction.user
         if not is_control_mod(member):
-            await interaction.response.send_message("❌ Officer or above only.", ephemeral=True)
+            await safe_respond(interaction, "❌ Officer or above only.", ephemeral=True)
             return False
         if not tama["active"]:
-            await interaction.response.send_message("❌ No active session.", ephemeral=True)
+            await safe_respond(interaction, "❌ No active session.", ephemeral=True)
             return False
         return True
 
