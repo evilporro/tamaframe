@@ -7,7 +7,7 @@
 # ============================================================
 GLOBAL_COOLDOWN_MINUTES         = 5
 ACTION_THRESHOLD                = 2
-RELIC_CLICK_THRESHOLD           = 6
+RELIC_CLICK_THRESHOLD           = 3
 RELIC_REACTANTS_NEEDED          = 10
 
 # ============================================================
