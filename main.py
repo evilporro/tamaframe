@@ -212,6 +212,13 @@ from tama_config import (
     FORMA_XP_MULT_BONUS, FORMA_XP_MULT_MAX, AFFINITY_BOOST_XP,
 )
 
+# Auto-pause: if no click lands for this long, decay stops applying until
+# someone clicks again. Operational safety net, not a balance knob — kept
+# here rather than in tama_config.py so it doesn't show up in the live
+# control-center override panel.
+INACTIVITY_PAUSE_SECONDS = 5 * 60
+IDLE_DECAY_MULT           = 0.1   # decay rate while idle — still ticking, just to a trickle
+
 # ---------------------------
 # SPRITE SOURCE
 # Fetched fresh on startup and every 12h so CDN URLs never expire.
@@ -345,6 +352,8 @@ def fresh_state(preserve_leaderboard=False):
         "stage": "relic",
         "dead": False,
         "paused": False,
+        "auto_paused": False,
+        "last_activity": None,
         "completed": False,
         "message_id": None,
         "channel_id": None,
@@ -401,6 +410,12 @@ def fresh_state(preserve_leaderboard=False):
         "feed_zero_since":  None,
         "clean_zero_since": None,
         "rest_zero_since":  None,
+        # Fractional decay carry — banks sub-1 decay amounts (e.g. during the
+        # idle slowdown) so they still accumulate instead of rounding to 0 forever.
+        "_decay_carry_feed":       0.0,
+        "_decay_carry_clean":      0.0,
+        "_decay_carry_level_stat": 0.0,
+        "_decay_carry_rest":       0.0,
         # Evolution condition trackers — reset each session
         "harrow_condition_met":    False,
         "saryn_survived_infection": False,
@@ -416,6 +431,7 @@ def fresh_state(preserve_leaderboard=False):
 tama = {
     "active": False,
     "session_id": None, "session_start_time": None, "stage": "relic", "dead": False, "paused": False,
+    "auto_paused": False, "last_activity": None,
     "completed": False, "message_id": None, "channel_id": None,
     "reactant_progress": 0, "reactants": 0, "relic_cracking": False,
     "feed": 70, "clean": 70, "level_stat": 70, "rest": 70,
@@ -446,6 +462,10 @@ tama = {
     "feed_zero_since":  None,
     "clean_zero_since": None,
     "rest_zero_since":  None,
+    "_decay_carry_feed":       0.0,
+    "_decay_carry_clean":      0.0,
+    "_decay_carry_level_stat": 0.0,
+    "_decay_carry_rest":       0.0,
     "yareli_prime_condition_met": False,
     "infection_count": 0, "infection_penalty_until": None,
     "consecutive_feeds": 0, "consecutive_cleans": 0,
@@ -737,6 +757,8 @@ def build_embed():
         embed.set_footer(text="You had one job. She's gone now.")
     elif tama["paused"]:
         embed.set_footer(text="⏸️ Paused | Care for it together. Every click counts.")
+    elif tama["auto_paused"]:
+        embed.set_footer(text="💤 Quiet for a while — decay has slowed to a trickle | Care for it together.")
     else:
         embed.set_footer(text="Care for it together. Every click counts.")
     embed.timestamp = datetime.now(timezone.utc)
@@ -851,6 +873,9 @@ async def _ping_when_ready(user_id: int, expires: datetime):
                 pass
 
 def add_to_leaderboard(user_id: int, name: str, is_train: bool = False):
+    tama["last_activity"] = datetime.now(timezone.utc)
+    if tama["auto_paused"]:
+        tama["auto_paused"] = False
     if user_id not in tama["leaderboard"]:
         tama["leaderboard"][user_id] = {"name": name, "clicks": 0, "train_clicks": 0}
     tama["leaderboard"][user_id]["clicks"] += 1
@@ -2115,6 +2140,19 @@ async def decay_loop():
                     asyncio.create_task(trigger_event("fissure", guild))
         return
 
+    # Idle slowdown: if nobody has clicked anything for INACTIVITY_PAUSE_SECONDS,
+    # decay drops to a trickle instead of stopping outright — the asset keeps
+    # ticking along quietly rather than visibly freezing. Sleep is exempt —
+    # it's time-boxed and self-resolving, no death risk while it runs.
+    now_check = datetime.now(timezone.utc)
+    if tama["last_activity"] is None:
+        tama["last_activity"] = now_check  # first tick of a fresh session — don't count as idle yet
+    idle_seconds = (now_check - tama["last_activity"]).total_seconds()
+    is_idle = not tama["sleeping"] and idle_seconds >= INACTIVITY_PAUSE_SECONDS
+    if is_idle != tama["auto_paused"]:
+        tama["auto_paused"] = is_idle
+        safe_task(refresh_embed(guild))
+
     decay_base     = get_config_value("DECAY_BASE")
     decay_interval = get_config_value("DECAY_INTERVAL")
     cooldown_mins  = get_config_value("GLOBAL_COOLDOWN_MINUTES")
@@ -2125,6 +2163,8 @@ async def decay_loop():
         decay = INFECTION_DECAY_PER_MIN * (decay_interval / 60.0) * infection_mult
     else:
         decay = decay_base * tama.get("decay_multiplier", 1.0)
+    if tama["auto_paused"]:
+        decay *= IDLE_DECAY_MULT
     corruption_lingering = tama.get("corruption_lingering_until") and datetime.now(timezone.utc) < tama["corruption_lingering_until"]
     if tama.get("decay_triple_until") and datetime.now(timezone.utc) < tama["decay_triple_until"]:
         decay *= 3
@@ -2157,10 +2197,19 @@ async def decay_loop():
     else:
         for k in STAT_KEYS:
             if k in ("feed", "clean"):
-                # Apply rest fatigue multiplier to Feed and Clean
-                tama[k] = max(0, tama[k] - int(decay * rest_decay_mult))
+                # Apply rest fatigue multiplier to Feed and Clean.
+                raw = decay * rest_decay_mult
             else:
-                tama[k] = max(0, tama[k] - decay)
+                raw = decay
+            # Fractional carry: idle decay is often <1/tick (e.g. 0.4).
+            # Truncating or rounding that every tick loses it permanently —
+            # this banks the remainder so it still accumulates and applies
+            # once it crosses a whole point, instead of reading as frozen.
+            carry_key = f"_decay_carry_{k}"
+            carry = tama.get(carry_key, 0.0) + raw
+            whole = int(carry)
+            tama[carry_key] = carry - whole
+            tama[k] = max(0, tama[k] - whole)
     if tama["sprite_override_until"] and datetime.now(timezone.utc) > tama["sprite_override_until"]:
         tama["sprite_override"]       = None
         tama["sprite_override_until"] = None
@@ -2753,6 +2802,12 @@ async def tama_restore(interaction: discord.Interaction, file: discord.Attachmen
         "leaderboard":              {int(k): v for k, v in save_data["leaderboard"].items()},
         "message_id":               None,
         # Reset all transient state
+        "auto_paused":              False,
+        "last_activity":            datetime.now(timezone.utc),
+        "_decay_carry_feed":        0.0,
+        "_decay_carry_clean":       0.0,
+        "_decay_carry_level_stat":  0.0,
+        "_decay_carry_rest":        0.0,
         "sleeping":                 False,
         "sleep_started":            None,
         "sleep_vote_yes":           set(),
@@ -3105,6 +3160,7 @@ def build_control_embed(guild) -> discord.Embed:
     if dead:             flags.append("💀 **DEAD**")
     if completed:        flags.append("✨ **COMPLETED**")
     if tama["paused"]:   flags.append("⏸️ Paused")
+    if tama["auto_paused"]: flags.append("💤 Idle (decay slowed)")
     if tama["sleeping"]: flags.append("😴 Sleeping")
     if tama["infected"]: flags.append("☣️ Infected")
     if tama.get("active_event"): flags.append(f"⚡ Event: `{tama['active_event']}`")
@@ -3358,7 +3414,7 @@ class ControlSessionView(ui.View):
         if not tama["active"] or tama["dead"]:
             await interaction.response.send_message("❌ Nothing to kill.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Kill triggered.", ephemeral=True)
+        await interaction.response.defer()
         await trigger_death(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3380,19 +3436,19 @@ class ControlActionView(ui.View):
     @ui.button(label="🍖 Feed",  style=discord.ButtonStyle.success,   custom_id="cc_act_feed",  row=0)
     async def act_feed(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
-        await interaction.response.send_message("✅ Triggered: Feed", ephemeral=True)
+        await interaction.response.defer()
         safe_task(trigger_action("feed", interaction.guild))
 
     @ui.button(label="🧼 Clean", style=discord.ButtonStyle.primary,   custom_id="cc_act_clean", row=0)
     async def act_clean(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
-        await interaction.response.send_message("✅ Triggered: Clean", ephemeral=True)
+        await interaction.response.defer()
         safe_task(trigger_action("clean", interaction.guild))
 
     @ui.button(label="⚡ Train", style=discord.ButtonStyle.danger,    custom_id="cc_act_train", row=0)
     async def act_train(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
-        await interaction.response.send_message("✅ Triggered: Train", ephemeral=True)
+        await interaction.response.defer()
         safe_task(trigger_action("train", interaction.guild))
 
     @ui.button(label="😴 Sleep", style=discord.ButtonStyle.secondary, custom_id="cc_act_sleep", row=0)
@@ -3401,7 +3457,7 @@ class ControlActionView(ui.View):
         if tama["sleeping"]:
             await interaction.response.send_message("❌ Already sleeping.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Triggered: Sleep", ephemeral=True)
+        await interaction.response.defer()
         await start_sleep(interaction.guild)
 
     @ui.button(label="☀️ Wake",  style=discord.ButtonStyle.secondary, custom_id="cc_act_wake",  row=0)
@@ -3419,7 +3475,7 @@ class ControlActionView(ui.View):
                     try: await (await ch.fetch_message(tama[mk])).delete()
                     except Exception: pass
                     tama[mk] = None
-        await interaction.response.send_message("✅ Woken up.", ephemeral=True)
+        await interaction.response.defer()
         await notify_wake_pings(interaction.guild)
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
@@ -3430,7 +3486,7 @@ class ControlActionView(ui.View):
         if tama["active_event"]:
             await interaction.response.send_message(f"❌ Event already active: `{tama['active_event']}`", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Triggered: Reactor", ephemeral=True)
+        await interaction.response.defer()
         await trigger_event("catalyst", interaction.guild)
 
     @ui.button(label="🔧 Forma",    style=discord.ButtonStyle.primary,   custom_id="cc_ev_forma", row=1)
@@ -3439,7 +3495,7 @@ class ControlActionView(ui.View):
         if tama["active_event"]:
             await interaction.response.send_message(f"❌ Event already active: `{tama['active_event']}`", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Triggered: Forma", ephemeral=True)
+        await interaction.response.defer()
         await trigger_event("forma", interaction.guild)
 
     @ui.button(label="✨ Affinity", style=discord.ButtonStyle.primary,   custom_id="cc_ev_aff",  row=1)
@@ -3448,7 +3504,7 @@ class ControlActionView(ui.View):
         if tama["active_event"]:
             await interaction.response.send_message(f"❌ Event already active: `{tama['active_event']}`", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Triggered: Affinity", ephemeral=True)
+        await interaction.response.defer()
         await trigger_event("affinity", interaction.guild)
 
     @ui.button(label="⚠️ Corrupted",style=discord.ButtonStyle.danger,    custom_id="cc_ev_cor",  row=1)
@@ -3457,7 +3513,7 @@ class ControlActionView(ui.View):
         if tama["active_event"]:
             await interaction.response.send_message(f"❌ Event already active: `{tama['active_event']}`", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Triggered: Corrupted", ephemeral=True)
+        await interaction.response.defer()
         await trigger_event("corrupted", interaction.guild)
 
     @ui.button(label="🌀 Fissure",  style=discord.ButtonStyle.primary,   custom_id="cc_ev_fiss", row=1)
@@ -3466,7 +3522,7 @@ class ControlActionView(ui.View):
         if tama["active_event"]:
             await interaction.response.send_message(f"❌ Event already active: `{tama['active_event']}`", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Triggered: Fissure", ephemeral=True)
+        await interaction.response.defer()
         await trigger_event("fissure", interaction.guild)
 
     @ui.button(label="☣️ Trigger Warning", style=discord.ButtonStyle.danger, custom_id="cc_inf_inf", row=2)
@@ -3482,7 +3538,7 @@ class ControlActionView(ui.View):
         ch = get_tama_channel(interaction.guild)
         if ch:
             safe_task(infection_warning(interaction.guild, ch))
-        await interaction.response.send_message("✅ Infection warning triggered.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3492,7 +3548,7 @@ class ControlActionView(ui.View):
         if not tama["infected"]:
             await interaction.response.send_message("❌ Not infected.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Infection cleared.", ephemeral=True)
+        await interaction.response.defer()
         await apply_rolling_guard(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3502,7 +3558,7 @@ class ControlActionView(ui.View):
         if tama["active_event"] != "corrupted":
             await interaction.response.send_message("❌ No active corruption.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Corruption cleared.", ephemeral=True)
+        await interaction.response.defer()
         await resolve_event("corrupted", interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3518,7 +3574,7 @@ class ControlActionView(ui.View):
             try: await (await ch.fetch_message(tama["event_message_id"])).delete()
             except Exception: pass
         tama["event_message_id"] = None
-        await interaction.response.send_message(f"✅ Event `{event}` cleared.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3537,7 +3593,7 @@ class ControlActionView(ui.View):
                     except Exception: pass
                     tama[mk] = None
             safe_task(delete_after(await ch.send(f"☀️ **{wf_name()} has woken up!** Rest restored. Ready for action."), 30))
-        await interaction.response.send_message("✅ Sleep cleared.", ephemeral=True)
+        await interaction.response.defer()
         await notify_wake_pings(interaction.guild)
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
@@ -3561,7 +3617,7 @@ class SetStatModal(ui.Modal):
         if tama["infected"] and all(tama[k] >= SICK_THRESHOLD for k in ("feed","clean","rest")):
             tama["infected"] = False; tama["infection_warned"] = False
             await clear_infection_messages(interaction.guild)
-        await interaction.response.send_message(f"✅ {self.stat_key.capitalize()} set to {v}.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3617,7 +3673,7 @@ class ControlSetView(ui.View):
         for k in STAT_KEYS: tama[k] = 100
         tama["dead"] = False; tama["infected"] = False; tama["infection_warned"] = False
         await clear_infection_messages(interaction.guild)
-        await interaction.response.send_message("✅ All stats maxed.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3631,7 +3687,7 @@ class ControlSetView(ui.View):
                 await inter.response.send_message("❌ Enter 0-30.", ephemeral=True)
                 return
             tama["level"] = v; tama["evo_xp"] = 0
-            await inter.response.send_message(f"✅ Level set to {v}.", ephemeral=True)
+            await inter.response.defer()
             await refresh_embed(inter.guild)
             await refresh_control_center(inter.guild)
         await interaction.response.send_modal(SetValueModal("Set Level", "Level (0-30)", "e.g. 15", cb))
@@ -3646,7 +3702,7 @@ class ControlSetView(ui.View):
                 await inter.response.send_message("❌ Enter a number.", ephemeral=True)
                 return
             tama["prime_xp_multiplier"] = v
-            await inter.response.send_message(f"✅ XP multiplier set to x{v:.2f}.", ephemeral=True)
+            await inter.response.defer()
             await refresh_embed(inter.guild)
             await refresh_control_center(inter.guild)
         await interaction.response.send_modal(SetValueModal("Set XP Multiplier", "Multiplier (0.1-5.0)", "e.g. 1.5", cb))
@@ -3669,7 +3725,7 @@ class ControlSetView(ui.View):
                 name = member.display_name if member else str(uid)
                 tama["leaderboard"][uid] = {"name": name, "clicks": 0, "train_clicks": 0}
             tama["leaderboard"][uid]["clicks"] = pts
-            await inter.response.send_message(f"✅ Points set to {pts}.", ephemeral=True)
+            await inter.response.defer()
             await refresh_embed(inter.guild)
             await refresh_control_center(inter.guild)
         await interaction.response.send_modal(SetValueModal("Set Points", "UserID then points", "e.g. 123456789 50", cb))
@@ -3678,14 +3734,14 @@ class ControlSetView(ui.View):
     async def reset_decay(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
         reset_config_to_defaults()
-        await interaction.response.send_message("✅ All overrides cleared. Config reset to tama_config.py defaults.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_control_center(interaction.guild)
 
     @ui.button(label="⏸ Pause",      style=discord.ButtonStyle.secondary, custom_id="cc_pause",     row=2)
     async def cc_pause(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
         tama["paused"] = True
-        await interaction.response.send_message("⏸️ Paused.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3693,7 +3749,7 @@ class ControlSetView(ui.View):
     async def cc_resume(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._check(interaction): return
         tama["paused"] = False
-        await interaction.response.send_message("▶️ Resumed.", ephemeral=True)
+        await interaction.response.defer()
         await refresh_embed(interaction.guild)
         await refresh_control_center(interaction.guild)
 
@@ -3702,13 +3758,13 @@ class ControlSetView(ui.View):
         if not await self._check(interaction): return
         tama["evolution_blocked"] = False
         if tama["stage"] == "relic":
-            await interaction.response.send_message("✅ Evolving to Warframe…", ephemeral=True)
+            await interaction.response.defer()
             await evolve_to_warframe(interaction.guild)
         elif tama["stage"] == "warframe":
-            await interaction.response.send_message("✅ Evolving to Prime…", ephemeral=True)
+            await interaction.response.defer()
             await evolve_to_prime(interaction.guild)
         elif tama["stage"] == "prime" and not tama.get("completed"):
-            await interaction.response.send_message("✅ Completing session…", ephemeral=True)
+            await interaction.response.defer()
             tama["level"] = LEVEL_MAX; tama["evo_xp"] = 0
             await trigger_prime_complete(interaction.guild)
         else:
@@ -3747,11 +3803,7 @@ class SetDecayPctModal(ui.Modal, title="Set Decay Percentage"):
             await interaction.response.send_message("❌ Enter a positive number.", ephemeral=True)
             return
         set_config_override("DECAY_BASE", v)
-        await interaction.response.send_message(
-            f"✅ Decay set to **{v}%** per tick. Takes effect on the next decay tick.\n"
-            f"⚠️ This resets to config default on next session start.",
-            ephemeral=True
-        )
+        await interaction.response.defer()
         await refresh_control_center(interaction.guild)
 
 
@@ -3779,11 +3831,7 @@ class SetCooldownModal(ui.Modal, title="Set Click Cooldown"):
             return
         total_minutes = m + (s / 60)
         set_config_override("GLOBAL_COOLDOWN_MINUTES", total_minutes)
-        await interaction.response.send_message(
-            f"✅ Click cooldown set to **{m}m {s}s**. Takes effect immediately.\n"
-            f"⚠️ This resets to config default on next session start.",
-            ephemeral=True
-        )
+        await interaction.response.defer()
         await refresh_control_center(interaction.guild)
 
 
@@ -3815,12 +3863,7 @@ class SetDecayTimeModal(ui.Modal, title="Set Decay Tick Interval"):
             )
             return
         set_config_override("DECAY_INTERVAL", total_seconds)
-        await interaction.response.send_message(
-            f"✅ Decay tick interval set to **{m}m {s}s** ({total_seconds}s). "
-            f"Takes effect on the next tick.\n"
-            f"⚠️ This resets to config default on next session start.",
-            ephemeral=True
-        )
+        await interaction.response.defer()
         await refresh_control_center(interaction.guild)
 
 
@@ -3850,11 +3893,7 @@ class ConfigEditModal(ui.Modal):
             await interaction.response.send_message("❌ Invalid value.", ephemeral=True)
             return
         set_config_override(self.config_key, v)
-        await interaction.response.send_message(
-            f"⚠️ **`{self.config_key}`** set to **{v}**. Takes effect on next decay tick.\n"
-            f"Deploy or delete the override file to reset to config defaults.",
-            ephemeral=True
-        )
+        await interaction.response.defer()
         await refresh_control_center(interaction.guild)
 
 

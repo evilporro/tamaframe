@@ -6,7 +6,7 @@
 # COOLDOWNS & THRESHOLDS
 # ============================================================
 GLOBAL_COOLDOWN_MINUTES         = 5
-ACTION_THRESHOLD                = 3
+ACTION_THRESHOLD                = 2
 RELIC_CLICK_THRESHOLD           = 6
 RELIC_REACTANTS_NEEDED          = 10
 
@@ -88,10 +88,10 @@ HAPPINESS_SUFFERING             = 20
 SLEEP_DURATION_SECONDS          = 1800
 SLEEP_MIN_BEFORE_WAKE           = 900
 SLEEP_VOTE_TIMEOUT              = 300
-SLEEP_YES_NEEDED                = 4
-SLEEP_NO_NEEDED                 = 4
-WAKE_YES_NEEDED                 = 4
-WAKE_NO_NEEDED                  = 4
+SLEEP_YES_NEEDED                = 2
+SLEEP_NO_NEEDED                 = 2
+WAKE_YES_NEEDED                 = 2
+WAKE_NO_NEEDED                  = 2
 WAKE_EARLY_STAT_PENALTY         = 20
 
 # ============================================================
@@ -100,7 +100,7 @@ WAKE_EARLY_STAT_PENALTY         = 20
 SICK_THRESHOLD                  = 20
 INFECTION_WARN_DURATION_SEC     = 300
 INFECTION_IMMUNITY_MINUTES      = 15
-ROLLING_GUARD_CLICKS_NEEDED     = 8
+ROLLING_GUARD_CLICKS_NEEDED     = 3   # NOTE: not currently read by main.py — EVENT_ROLLING_GUARD_CLICKS below is the live value. Kept in sync until the wiring bug is fixed.
 ROLLING_GUARD_WINDOW_MIN        = 20
 ROLLING_GUARD_FAIL_STAT_HIT     = 15
 ROLLING_GUARD_SUCCESS_BONUS     = 0
@@ -108,7 +108,7 @@ ROLLING_GUARD_SUCCESS_BONUS     = 0
 INFECTION_DECAY_PER_MIN         = 5
 INFECTION_DECAY_CAP_MULT        = 3
 INFECTION_PENALTY_DURATION_MIN  = 20
-ACTION_THRESHOLD_POST_INFECTION = 4
+ACTION_THRESHOLD_POST_INFECTION = 3
 
 # ============================================================
 # DEATH
@@ -119,12 +119,12 @@ DEATH_STAT_ZERO_DURATION_SEC    = 1800
 # ============================================================
 # EVENTS
 # ============================================================
-EVENT_CATALYST_CLICKS           = 5
-EVENT_FORMA_CLICKS              = 5
-EVENT_AFFINITY_CLICKS           = 5
-EVENT_CORRUPTED_CLICKS          = 5
-EVENT_ROLLING_GUARD_CLICKS      = 5
-EVENT_CORRUPTED_FAIL_HIT        = 10
+EVENT_CATALYST_CLICKS           = 3
+EVENT_FORMA_CLICKS              = 3
+EVENT_AFFINITY_CLICKS           = 3
+EVENT_CORRUPTED_CLICKS          = 3
+EVENT_ROLLING_GUARD_CLICKS      = 3
+EVENT_CORRUPTED_FAIL_HIT        = 6
 EVENT_CATALYST_DURATION_MIN     = 30
 
 EVENT_FISSURE_DURATION_MIN      = 15
