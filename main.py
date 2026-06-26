@@ -881,7 +881,6 @@ def add_to_leaderboard(user_id: int, name: str, is_train: bool = False):
     tama["leaderboard"][user_id]["clicks"] += 1
     if is_train:
         tama["leaderboard"][user_id]["train_clicks"] += 1
-        # Don't double-count — train already incremented clicks above
 
 # ---------------------------
 # VIEWS
@@ -925,9 +924,10 @@ class GatherButton(ui.Button):
             await interaction.response.send_message("This button is no longer active.", ephemeral=True, delete_after=6)
             return
         set_cooldown(interaction.user.id)
-        add_to_leaderboard(interaction.user.id, interaction.user.display_name)
         fissure_bonus = tama["active_event"] == "fissure"
-        tama["action_progress"]["reactant"] += 2 if fissure_bonus else 1
+        add_to_leaderboard(interaction.user.id, interaction.user.display_name, bonus=1)
+        # During fissure, one click = one full reactant (add full threshold worth of progress)
+        tama["action_progress"]["reactant"] += RELIC_CLICK_THRESHOLD if fissure_bonus else 1
         if tama["action_progress"]["reactant"] >= RELIC_CLICK_THRESHOLD:
             tama["action_progress"]["reactant"] = 0
             tama["reactants"] = min(RELIC_REACTANTS_NEEDED, tama["reactants"] + 1)
@@ -2199,6 +2199,12 @@ async def decay_loop():
             if k in ("feed", "clean"):
                 # Apply rest fatigue multiplier to Feed and Clean.
                 raw = decay * rest_decay_mult
+            elif k == "rest":
+                # Rest decays much slower than other stats — it's the sleep-pressure
+                # mechanic, not a constant crisis. At full decay=4, rest decays at 1/tick
+                # (0.25x), so a crew training actively can sustain 5+ hours before sleep
+                # is genuinely needed, rather than hitting crisis in under an hour.
+                raw = decay * 0.25
             else:
                 raw = decay
             # Fractional carry: idle decay is often <1/tick (e.g. 0.4).
@@ -2213,6 +2219,12 @@ async def decay_loop():
     if tama["sprite_override_until"] and datetime.now(timezone.utc) > tama["sprite_override_until"]:
         tama["sprite_override"]       = None
         tama["sprite_override_until"] = None
+
+    # Passive rest trickle — combined with the reduced decay rate above, this means
+    # rest at idle barely moves at all (0.1 decay - 1 recovery = net gain at idle),
+    # while at full active rate it still drains slowly (1/tick decay net of recovery).
+    if not tama["sleeping"] and not tama["infected"]:
+        tama["rest"] = min(STAT_MAX, tama["rest"] + 1)
     immunity = tama.get("infection_immunity_until")
     # Clear infection warning immediately if stats recovered
     if tama["infection_warned"] and not tama["infected"]:

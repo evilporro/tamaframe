@@ -39,7 +39,7 @@ FEED_OVERFED_THRESHOLD          = 95
 FEED_LOCK_DURATION_MIN          = 15
 
 CLEAN_GAIN                      = 15
-CLEAN_REST_COST                 = 4
+CLEAN_REST_COST                 = 1
 CLEAN_OVER_THRESHOLD            = 95
 
 TRAIN_STAT_GAIN                 = 15
@@ -53,9 +53,9 @@ TRAIN_REST_TIER_LOW             = 25
 TRAIN_REST_TIER_MID             = 50
 TRAIN_REST_TIER_HIGH            = 75
 
-TRAIN_REST_COST_HIGH            = 10
-TRAIN_REST_COST_MID             = 25
-TRAIN_REST_COST_LOW             = 35
+TRAIN_REST_COST_HIGH            = 2
+TRAIN_REST_COST_MID             = 5
+TRAIN_REST_COST_LOW             = 10
 
 TRAIN_REST_XP_MULT_FULL         = 1.0
 TRAIN_REST_XP_MULT_HIGH         = 0.75
@@ -114,7 +114,7 @@ ACTION_THRESHOLD_POST_INFECTION = 3
 # DEATH
 # ============================================================
 DEATH_STAT_ZEROS_NEEDED         = 2
-DEATH_STAT_ZERO_DURATION_SEC    = 1800
+DEATH_STAT_ZERO_DURATION_SEC    = 5400
 
 # ============================================================
 # EVENTS
