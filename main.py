@@ -925,7 +925,7 @@ class GatherButton(ui.Button):
             return
         set_cooldown(interaction.user.id)
         fissure_bonus = tama["active_event"] == "fissure"
-        add_to_leaderboard(interaction.user.id, interaction.user.display_name, bonus=1)
+        add_to_leaderboard(interaction.user.id, interaction.user.display_name)
         # During fissure, one click = one full reactant (add full threshold worth of progress)
         tama["action_progress"]["reactant"] += RELIC_CLICK_THRESHOLD if fissure_bonus else 1
         if tama["action_progress"]["reactant"] >= RELIC_CLICK_THRESHOLD:
